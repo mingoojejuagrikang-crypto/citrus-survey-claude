@@ -698,7 +698,7 @@ function clearLogs() {
 document.addEventListener('DOMContentLoaded', () => {
   // Service Worker
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js')
+    navigator.serviceWorker.register('./sw.js')
       .then(reg => addLog({ event: 'sw_registered', scope: reg.scope }))
       .catch(err => addLog({ event: 'sw_error', error: err.message }));
   }
