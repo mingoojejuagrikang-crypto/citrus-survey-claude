@@ -1,600 +1,148 @@
+// app.js – 감귤 조사 PWA 메인 앱 (스키마 기반 음성 입력)
+import { getFields, saveFields, resetFields, addField, updateField, removeField, generateAliases } from './field-config.js';
+import { parseVoice, canOverwrite, runTests } from './parser.js';
+
 'use strict';
 
-/* ─────────────────────────────────────────────
-   1. CONSTANTS & DICTIONARIES
-───────────────────────────────────────────── */
+// ─── VAD 모드별 silence 임계 (ms) ─────────────────────────
+const VAD_TIMEOUT = { fast: 750, balanced: 1200, accurate: 1700 };
 
-// 측정 항목 → 단위
-const MEASURE_FIELDS = {
-  횡경: 'mm', 종경: 'mm',
-  엽장: 'mm', 엽폭: 'mm',
-  과중: 'g', 과피중: 'g',
-  과피두께: 'mm', 과피두께x4: 'mm',
-  당도: 'Brix', 비파괴: 'Brix',
-  적정: '', 산함량: '%', 당산도: '',
-  착색: '%'
-};
-
-// 컨텍스트 명령
-const CTX_FIELDS = ['나무', '과실', '농가', '라벨', '처리'];
-
-// 특수 명령
-const CMDS = ['수정', '정정', '취소', '비고'];
-
-// 별칭 사전 (95개+)
-const ALIASES = {
-  횡경: ['회경','횡겨','횡견','형경','형견','행경','황경','홍경','항경','혜경','헹경'],
-  종경: ['종겨','종견','정경','중경','층경','충경'],
-  엽장: ['엽짱','엽자','입장','열장','엽쟁'],
-  엽폭: ['엽포','입폭','열폭','엽복','엽폭'],
-  과중: ['과주','과쥬','과충','가중','과증'],
-  당도: ['당독','당두','단도','댕도'],
-  착색: ['착새','착섹','착색','착색도'],
-  비파괴: ['비파','비파괴','비파퀴'],
-  산함량: ['산함','산함양','산양'],
-  당산도: ['당산','당산비'],
-  적정: ['적점','적정산'],
-  과피중: ['과피주','과피무게'],
-  과피두께: ['과피두끼','과피두께','과피'],
-  나무: ['나무','나무번호','tree'],
-  과실: ['과실','과실번호','과','fruit'],
-  농가: ['농가','농가명','farm'],
-  라벨: ['라벨','레벨','label'],
-  처리: ['처리','처리구','treatment'],
-  수정: ['수정','정정','修正'],
-  취소: ['취소','Cancel','캔슬']
-};
-
-// 한글 숫자 → 아라비아
-const KOREAN_NUM = {
-  '영':0,'일':1,'이':2,'삼':3,'사':4,'오':5,
-  '육':6,'칠':7,'팔':8,'구':9,'십':10,
-  '십일':11,'십이':12,'십삼':13,'십사':14,'십오':15,
-  '십육':16,'십칠':17,'십팔':18,'십구':19,'이십':20,
-  '삼십':30,'사십':40,'오십':50,'육십':60,'칠십':70,'팔십':80,'구십':90
-};
-
-// 범위
-const RANGES = {
-  횡경: [10, 100], 종경: [10, 100],
-  과중: [5, 300], 당도: [3, 25],
-  적정: [0.1, 10], 산함량: [0.1, 10],
-  착색: [0, 100], 비파괴: [3, 25],
-  과피중: [5, 200], 과피두께: [0.5, 20]
-};
-
-/* ─────────────────────────────────────────────
-   2. STATE
-───────────────────────────────────────────── */
+// ─── 상태 ──────────────────────────────────────────────────
 const state = {
-  // session context
-  ctx: {
-    farmName: '',
-    label: '',
-    treatment: '',
-    treeNo: 1,
-    fruitNo: 1,
-    surveyType: '비대조사',
-    observer: ''
-  },
-  // current fruit data
-  currentData: {},
-  // undo stack
-  undoStack: [],
-  // recognition
   isRecording: false,
   recognition: null,
-  // logs (saved to localStorage)
-  logs: JSON.parse(localStorage.getItem('voiceLogs') || '[]'),
-  // settings
-  settings: JSON.parse(localStorage.getItem('appSettings') || '{}')
+  vadMode: 'balanced',     // fast | balanced | accurate
+  ttsRate: 0.92,
+  currentData: {},         // { fieldId: { value, warn, time } }
+  lastSaved: null,         // { fieldId, value, time }
+  pendingField: null,      // { field } – 값 대기 중
+  memoMode: false,
+  llmStatus: 'unavailable', // unavailable | loading | ready | failed
+  logs: [],
+  silenceTimer: null,
 };
 
-/* ─────────────────────────────────────────────
-   3. SPEECH RECOGNITION
-───────────────────────────────────────────── */
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-
-function initRecognition() {
-  if (!SpeechRecognition) return null;
-  const r = new SpeechRecognition();
-  r.lang = 'ko-KR';
-  r.continuous = true;
-  r.interimResults = true;
-  r.maxAlternatives = 5;
-  return r;
-}
-
-/* ─────────────────────────────────────────────
-   4. FUZZY MATCHING
-───────────────────────────────────────────── */
-function editDistance(a, b) {
-  const m = a.length, n = b.length;
-  const dp = Array.from({length: m+1}, (_, i) => Array.from({length: n+1}, (_, j) => i === 0 ? j : j === 0 ? i : 0));
-  for (let i = 1; i <= m; i++)
-    for (let j = 1; j <= n; j++)
-      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
-  return dp[m][n];
-}
-
-function matchField(token) {
-  const t = token.trim().toLowerCase();
-  // exact match
-  for (const field of [...Object.keys(MEASURE_FIELDS), ...CTX_FIELDS, ...CMDS]) {
-    if (field === t) return { field, score: 1.0, method: 'exact' };
-  }
-  // alias match
-  for (const [field, aliases] of Object.entries(ALIASES)) {
-    for (const alias of aliases) {
-      if (alias === t) return { field, score: 0.95, method: 'alias' };
-    }
-  }
-  // edit distance
-  let best = null, bestDist = 99;
-  const allFields = [...Object.keys(MEASURE_FIELDS), ...CTX_FIELDS, ...CMDS];
-  for (const field of allFields) {
-    const d = editDistance(t, field);
-    if (d < bestDist && d <= 2) { bestDist = d; best = field; }
-  }
-  if (best) return { field: best, score: Math.max(0.5, 1 - bestDist * 0.2), method: 'fuzzy' };
-  return null;
-}
-
-/* ─────────────────────────────────────────────
-   5. NUMBER PARSING
-───────────────────────────────────────────── */
-function parseNumber(str) {
-  if (!str) return null;
-  // 아라비아
-  const n = parseFloat(str.replace(/[^\d.]/g, ''));
-  if (!isNaN(n)) return n;
-  // 한글 숫자
-  const lower = str.toLowerCase();
-  if (KOREAN_NUM[lower] !== undefined) return KOREAN_NUM[lower];
-  // 복합 (이십이점오 → 22.5)
-  const m = str.match(/^([가-힣]+)점([가-힣]+)$/);
-  if (m) {
-    const intPart = KOREAN_NUM[m[1]];
-    const decPart = KOREAN_NUM[m[2]];
-    if (intPart !== undefined && decPart !== undefined)
-      return parseFloat(`${intPart}.${decPart}`);
-  }
-  return null;
-}
-
-/* ─────────────────────────────────────────────
-   6. STREAM PARSER (연속 발화)
-───────────────────────────────────────────── */
-function parseStream(text) {
-  // 붙여쓴 경우 분리: "횡경22.5" → "횡경 22.5"
-  const normalized = text
-    .replace(/([가-힣])(\d)/g, '$1 $2')
-    .replace(/(\d)([가-힣])/g, '$1 $2')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const tokens = normalized.split(' ');
-  const parsed = [];
-  let i = 0;
-
-  while (i < tokens.length) {
-    const tok = tokens[i];
-    const match = matchField(tok);
-
-    if (!match) {
-      // 숫자만 나온 경우 이전 필드에 붙이기
-      const num = parseNumber(tok);
-      if (num !== null && parsed.length > 0 && parsed[parsed.length-1].value === null) {
-        parsed[parsed.length-1].value = num;
-        parsed[parsed.length-1].rawValue = tok;
-      } else {
-        parsed.push({ type: 'unknown', raw: tok, field: null, value: null });
-      }
-      i++;
-      continue;
-    }
-
-    const field = match.field;
-    let value = null;
-    let rawValue = '';
-
-    // 다음 토큰이 숫자면 값으로
-    if (i + 1 < tokens.length) {
-      const nextNum = parseNumber(tokens[i+1]);
-      if (nextNum !== null) {
-        value = nextNum;
-        rawValue = tokens[i+1];
-        i += 2;
-      } else {
-        // 비고 같은 경우 텍스트 값
-        if (field === '비고') {
-          value = tokens.slice(i+1, i+4).join(' ');
-          rawValue = value;
-          i = Math.min(i+4, tokens.length);
-        } else {
-          i++;
-        }
-      }
-    } else {
-      i++;
-    }
-
-    // 타입 결정
-    let type = 'unknown';
-    if (MEASURE_FIELDS[field]) type = 'measure';
-    else if (CTX_FIELDS.includes(field)) type = 'ctx';
-    else if (CMDS.includes(field)) type = 'cmd';
-
-    parsed.push({
-      type,
-      field,
-      value,
-      rawValue,
-      raw: tok,
-      matchScore: match.score,
-      matchMethod: match.method
-    });
-  }
-
-  return { normalized, tokens: parsed };
-}
-
-/* ─────────────────────────────────────────────
-   7. APPLY PARSED TOKENS
-───────────────────────────────────────────── */
-function applyTokens(tokens) {
-  const actions = [];
-  let modifyMode = false;
-
-  for (const tok of tokens) {
-    if (tok.type === 'unknown') continue;
-
-    if (tok.field === '취소') {
-      if (state.undoStack.length > 0) {
-        const prev = state.undoStack.pop();
-        state.currentData[prev.field] = prev.value;
-        actions.push({ action: 'undo', field: prev.field, value: prev.value });
-        speak('취소');
-      }
-      continue;
-    }
-
-    if (tok.field === '수정' || tok.field === '정정') {
-      modifyMode = true;
-      actions.push({ action: 'modify_mode' });
-      speak('수정');
-      continue;
-    }
-
-    if (tok.type === 'ctx' && tok.value !== null) {
-      const map = { 나무: 'treeNo', 과실: 'fruitNo', 농가: 'farmName', 라벨: 'label', 처리: 'treatment' };
-      const key = map[tok.field];
-      if (key) {
-        state.ctx[key] = tok.value;
-        actions.push({ action: 'ctx_change', field: tok.field, value: tok.value });
-        speak(`${tok.field} ${tok.value}`);
-      }
-      continue;
-    }
-
-    if (tok.type === 'measure' && tok.value !== null) {
-      // range check
-      const range = RANGES[tok.field];
-      const outOfRange = range && (tok.value < range[0] || tok.value > range[1]);
-
-      // undo stack
-      state.undoStack.push({ field: tok.field, value: state.currentData[tok.field] ?? null });
-      if (state.undoStack.length > 20) state.undoStack.shift();
-
-      state.currentData[tok.field] = tok.value;
-      actions.push({ action: 'measure', field: tok.field, value: tok.value, outOfRange });
-
-      speak(outOfRange ? `${tok.field} ${tok.value} 확인` : `${tok.field} ${tok.value}`);
-    }
-  }
-
-  return actions;
-}
-
-/* ─────────────────────────────────────────────
-   8. TTS
-───────────────────────────────────────────── */
+// ─── TTS ────────────────────────────────────────────────────
 function speak(text) {
-  if (!window.speechSynthesis) return;
+  if (!window.speechSynthesis || !text) return;
+  window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'ko-KR';
-  u.rate = 1.1;
-  u.pitch = 1;
-  window.speechSynthesis.cancel();
+  u.rate = state.ttsRate;
+  u.pitch = 1.0;
   window.speechSynthesis.speak(u);
 }
 
-/* ─────────────────────────────────────────────
-   9. LOGGING
-───────────────────────────────────────────── */
+// ─── 로그 ───────────────────────────────────────────────────
 function addLog(entry) {
-  const log = {
-    id: Date.now(),
-    timestamp: new Date().toISOString(),
-    deviceInfo: {
-      ua: navigator.userAgent,
-      platform: navigator.platform,
-      online: navigator.onLine,
-      lang: navigator.language
-    },
+  const item = {
+    id: Date.now() + Math.random(),
+    ts: new Date().toISOString(),
     ...entry
   };
-  state.logs.unshift(log);
-  if (state.logs.length > 500) state.logs.pop();
-  localStorage.setItem('voiceLogs', JSON.stringify(state.logs));
-  renderLogs();
-  return log;
+  state.logs.unshift(item);
+  if (state.logs.length > 300) state.logs.length = 300;
+  try { localStorage.setItem('citrusLogs_v3', JSON.stringify(state.logs.slice(0, 200))); } catch {}
+  return item;
 }
 
-/* ─────────────────────────────────────────────
-   10. UI RENDERING
-───────────────────────────────────────────── */
-function renderContext() {
-  const el = document.getElementById('contextBar');
-  if (!el) return;
-  const c = state.ctx;
-  el.innerHTML = `
-    <div class="ctx-item"><span>조사유형</span> <strong>${c.surveyType}</strong></div>
-    <div class="ctx-item"><span>농가</span> <strong>${c.farmName || '-'}</strong></div>
-    <div class="ctx-item"><span>라벨</span> <strong>${c.label || '-'}</strong></div>
-    <div class="ctx-item"><span>처리</span> <strong>${c.treatment || '-'}</strong></div>
-    <div class="ctx-item"><span>나무</span> <strong>${c.treeNo}</strong></div>
-    <div class="ctx-item"><span>과실</span> <strong>${c.fruitNo}</strong></div>
-  `;
+function loadLogs() {
+  try {
+    const raw = localStorage.getItem('citrusLogs_v3');
+    if (raw) state.logs = JSON.parse(raw);
+  } catch {}
 }
 
-function renderFields() {
-  const el = document.getElementById('fieldsGrid');
-  if (!el) return;
-  const fields = state.ctx.surveyType === '비대조사'
-    ? ['횡경', '종경']
-    : ['횡경', '종경', '과중', '과피중', '과피두께', '당도', '적정', '산함량', '착색', '비파괴'];
+// ─── 음성 인식 ──────────────────────────────────────────────
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-  el.innerHTML = fields.map(f => {
-    const val = state.currentData[f];
-    const range = RANGES[f];
-    let cls = '';
-    if (val !== undefined && range) {
-      if (val < range[0] || val > range[1]) cls = 'field-error';
-    }
-    return `<div class="field-card ${cls}">
-      <div class="field-name">${f}</div>
-      <div class="field-val">${val !== undefined ? val : '--'}</div>
-      <div class="field-unit">${MEASURE_FIELDS[f] || ''}</div>
-    </div>`;
-  }).join('');
-}
-
-function renderParseResult(parsed) {
-  const el = document.getElementById('parseResult');
-  if (!el || !parsed) return;
-  el.innerHTML = `<h3>파싱 결과</h3><div class="token-list">${
-    parsed.tokens.map(t => {
-      const label = t.value !== null
-        ? `${t.field || t.raw} ${t.value}`
-        : (t.field || t.raw);
-      return `<span class="token ${t.type}" title="신뢰도: ${((t.matchScore||0)*100).toFixed(0)}% | ${t.matchMethod||'?'}">${label}</span>`;
-    }).join('')
-  }</div>`;
-}
-
-function renderLogs() {
-  const el = document.getElementById('logEntries');
-  if (!el) return;
-  el.textContent = state.logs.slice(0, 50).map(l =>
-    `[${l.timestamp.substring(11,19)}] ${l.event}\n${JSON.stringify(l, null, 2)}\n`
-  ).join('\n────────────────\n');
-
-  const cnt = document.getElementById('logCount');
-  if (cnt) cnt.textContent = `총 ${state.logs.length}건`;
-}
-
-function renderLogTable() {
-  const el = document.getElementById('logTable');
-  if (!el) return;
-  const recent = state.logs.filter(l => l.event === 'voice_result').slice(0, 30);
-  if (recent.length === 0) {
-    el.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text2);padding:20px">아직 음성 로그 없음</td></tr>';
-    return;
-  }
-  el.innerHTML = recent.map(l => {
-    const conf = Math.round((l.confidence || 0) * 100);
-    const confColor = conf > 80 ? 'var(--success)' : conf > 50 ? 'var(--warn)' : 'var(--error)';
-    return `<tr>
-      <td>${l.timestamp.substring(11,19)}</td>
-      <td style="max-width:180px;word-break:break-all">${l.rawText || ''}</td>
-      <td>${conf}%<div class="conf-bar"><div class="conf-fill" style="width:${conf}%;background:${confColor}"></div></div></td>
-      <td>${l.tokenCount || 0}</td>
-      <td>${l.actions?.map(a => a.action).join(', ') || '-'}</td>
-    </tr>`;
-  }).join('');
-}
-
-function updateOnlineStatus() {
-  const badge = document.getElementById('statusBadge');
-  if (!badge) return;
-  if (navigator.onLine) {
-    badge.textContent = '온라인';
-    badge.className = 'status-badge online';
-  } else {
-    badge.textContent = '오프라인';
-    badge.className = 'status-badge offline';
-  }
-}
-
-function showToast(msg, dur = 2000) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.classList.remove('hidden');
-  clearTimeout(window._toastTimer);
-  window._toastTimer = setTimeout(() => t.classList.add('hidden'), dur);
-}
-
-/* ─────────────────────────────────────────────
-   11. RECOGNITION CONTROL
-───────────────────────────────────────────── */
 function startRecording() {
-  if (!SpeechRecognition) {
-    showToast('이 브라우저는 음성인식을 지원하지 않습니다');
-    addLog({ event: 'error', error: 'SpeechRecognition not supported', ua: navigator.userAgent });
-    return;
-  }
+  if (!SR) { showToast('이 브라우저는 음성인식을 지원하지 않습니다'); return; }
+  if (state.isRecording) return;
 
-  recognition = initRecognition();
-  const startTime = Date.now();
+  state.recognition = new SR();
+  const r = state.recognition;
+  r.lang = 'ko-KR';
+  r.continuous = true;
+  r.interimResults = true;
+  r.maxAlternatives = 3;
 
-  addLog({
-    event: 'recording_start',
-    ctx: { ...state.ctx },
-    browserSupport: {
-      speechRecognition: !!SpeechRecognition,
-      speechSynthesis: !!window.speechSynthesis,
-      serviceWorker: 'serviceWorker' in navigator,
-      online: navigator.onLine
-    }
-  });
-
-  recognition.onstart = () => {
+  r.onstart = () => {
     state.isRecording = true;
     updateMicBtn();
-    addLog({ event: 'recognition_started', elapsedMs: Date.now() - startTime });
+    addLog({ event: 'rec_start' });
   };
 
-  recognition.onaudiostart = () => {
-    addLog({ event: 'audio_started' });
-  };
-
-  recognition.onspeechstart = () => {
-    addLog({ event: 'speech_started' });
-  };
-
-  recognition.onspeechend = () => {
-    addLog({ event: 'speech_ended' });
-  };
-
-  let interimBuffer = '';
-  recognition.onresult = (e) => {
-    const resultStart = Date.now();
-    let interim = '';
-    let final = '';
+  r.onresult = (e) => {
+    clearSilenceTimer();
+    let interim = '', finalText = '';
 
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const res = e.results[i];
-      const transcript = res[0].transcript;
-      const confidence = res[0].confidence;
-
+      const tx = res[0].transcript;
       if (res.isFinal) {
-        final += transcript;
-
-        // 모든 대안 기록
-        const alternatives = [];
-        for (let j = 0; j < res.length; j++) {
-          alternatives.push({
-            transcript: res[j].transcript,
-            confidence: res[j].confidence
-          });
-        }
-
-        // parse
-        const parsed = parseStream(transcript);
-        const actions = applyTokens(parsed.tokens);
-
-        // log
-        addLog({
-          event: 'voice_result',
-          rawText: transcript,
-          confidence,
-          alternatives,
-          normalized: parsed.normalized,
-          tokenCount: parsed.tokens.length,
-          tokens: parsed.tokens,
-          actions,
-          processingMs: Date.now() - resultStart,
-          ctx: { ...state.ctx },
-          isOnline: navigator.onLine
-        });
-
-        // update UI
-        renderParseResult(parsed);
-        renderContext();
-        renderFields();
-        renderLogTable();
-
-        document.getElementById('transcriptFinal').textContent = transcript;
-        document.getElementById('transcriptInterim').textContent = '';
+        finalText += tx;
       } else {
-        interim += transcript;
+        interim += tx;
       }
     }
 
     if (interim) {
-      document.getElementById('transcriptInterim').textContent = interim;
+      showInterim(interim);
+    }
+
+    if (finalText) {
+      showInterim('');
+      processFinalText(finalText.trim(), e.results[e.resultIndex]?.[0]?.confidence ?? 1);
+    } else if (interim) {
+      // 침묵 타이머: VAD 모드에 따라 자동 확정
+      startSilenceTimer(interim);
     }
   };
 
-  recognition.onerror = (e) => {
-    addLog({
-      event: 'recognition_error',
-      error: e.error,
-      message: e.message,
-      isOnline: navigator.onLine
-    });
-
-    const errorMap = {
-      'not-allowed': '마이크 권한이 거부되었습니다',
-      'no-speech': '음성이 감지되지 않았습니다',
-      'network': '네트워크 오류 (오프라인에서는 음성인식이 제한될 수 있음)',
-      'service-not-allowed': '음성인식 서비스가 허용되지 않음',
-      'aborted': '인식이 중단되었습니다'
-    };
-
-    showToast(errorMap[e.error] || `오류: ${e.error}`, 3000);
-
-    if (e.error === 'network' || e.error === 'no-speech') {
-      // 네트워크 오류면 자동 재시작 시도
-      setTimeout(() => {
-        if (state.isRecording) {
-          try { recognition.start(); } catch(err) {}
-        }
-      }, 1000);
+  r.onerror = (e) => {
+    addLog({ event: 'rec_error', error: e.error });
+    if (e.error === 'not-allowed') {
+      showToast('마이크 권한이 필요합니다');
+      stopRecording();
+    } else if (e.error === 'no-speech') {
+      // 무시 – 계속 녹음
+    } else if (e.error === 'network') {
+      showToast('네트워크 오류 – 재시도 중...');
+      scheduleRestart();
     } else if (e.error !== 'aborted') {
       stopRecording();
     }
   };
 
-  recognition.onend = () => {
-    addLog({ event: 'recognition_ended', isRecording: state.isRecording });
-    if (state.isRecording) {
-      // 연속 인식 유지
-      setTimeout(() => {
-        try { recognition.start(); } catch(err) {}
-      }, 300);
-    }
+  r.onend = () => {
+    if (state.isRecording) scheduleRestart();
   };
 
-  try {
-    recognition.start();
-  } catch(e) {
-    addLog({ event: 'start_error', error: e.message });
-    showToast(`시작 실패: ${e.message}`);
+  try { r.start(); } catch(e) {
+    addLog({ event: 'rec_start_fail', err: e.message });
+    showToast('시작 실패: ' + e.message);
   }
+}
+
+function scheduleRestart() {
+  setTimeout(() => {
+    if (state.isRecording && state.recognition) {
+      try { state.recognition.start(); } catch {}
+    }
+  }, 300);
 }
 
 function stopRecording() {
   state.isRecording = false;
+  clearSilenceTimer();
   updateMicBtn();
-  if (recognition) {
-    try { recognition.stop(); } catch(e) {}
-    recognition = null;
+  if (state.recognition) {
+    try { state.recognition.stop(); } catch {}
+    state.recognition = null;
   }
-  addLog({ event: 'recording_stop', ctx: { ...state.ctx } });
-  speak('음성입력 종료');
+  addLog({ event: 'rec_stop' });
+  speak('종료');
 }
 
 function toggleRecording() {
@@ -602,7 +150,146 @@ function toggleRecording() {
     stopRecording();
   } else {
     startRecording();
-    speak('음성입력 시작');
+    speak('시작');
+  }
+}
+
+function startSilenceTimer(interimText) {
+  clearSilenceTimer();
+  const ms = VAD_TIMEOUT[state.vadMode] || 1200;
+  state.silenceTimer = setTimeout(() => {
+    if (interimText.trim()) {
+      processFinalText(interimText.trim(), 0.7);
+      showInterim('');
+    }
+  }, ms);
+}
+
+function clearSilenceTimer() {
+  if (state.silenceTimer) { clearTimeout(state.silenceTimer); state.silenceTimer = null; }
+}
+
+// ─── 음성 처리 ──────────────────────────────────────────────
+function processFinalText(text, confidence) {
+  const fields = getFields();
+
+  // === 취소 명령 ===
+  if (/^(취소|캔슬|cancel)$/i.test(text)) {
+    // undo last
+    const lastKey = Object.keys(state.currentData).pop();
+    if (lastKey) {
+      const old = state.currentData[lastKey];
+      delete state.currentData[lastKey];
+      speak('취소');
+      addLog({ event: 'undo', fieldId: lastKey });
+      renderFields();
+    }
+    showFinal(text);
+    return;
+  }
+
+  // === 비고 모드 진입 후 텍스트 수집 ===
+  if (state.memoMode) {
+    const memoField = fields.find(f => f.freeText);
+    if (memoField) {
+      state.currentData[memoField.id] = { value: text, warn: false, time: Date.now() };
+      state.lastSaved = { fieldId: memoField.id, value: text, time: Date.now() };
+      state.memoMode = false;
+      speak('비고 저장');
+      addLog({ event: 'save', field: memoField.name, value: text, method: 'memo_mode', confidence });
+      renderAll();
+    }
+    showFinal(text);
+    setPendingBar(null);
+    return;
+  }
+
+  // === overwrite 시도: 숫자만 나온 경우 ===
+  const owResult = canOverwrite(text, state.lastSaved, fields);
+  if (owResult && /^[\d.,가-힣점]+$/.test(text.replace(/\s/g, ''))) {
+    const { field, value, warn } = owResult;
+    state.currentData[field.id] = { value, warn, time: Date.now() };
+    state.lastSaved = { fieldId: field.id, value, time: Date.now() };
+    const ttsText = field.name + ' ' + value + (warn ? ' 주의' : '');
+    speak(ttsText);
+    addLog({ event: 'overwrite', field: field.name, value, confidence });
+    renderAll();
+    showFinal(text);
+    renderParseResult([{ field, value, status: 'ok', warn, method: 'overwrite', raw: text }]);
+    return;
+  }
+
+  // === 규칙 기반 파서 ===
+  const parsed = parseVoice(text, fields);
+  showFinal(text);
+  renderParseResult(parsed);
+
+  if (parsed.length === 0) {
+    addLog({ event: 'no_match', text, confidence });
+    return;
+  }
+
+  let savedAny = false;
+  for (const item of parsed) {
+    const { field, value, status, warn, method } = item;
+
+    if (!field) continue;
+
+    // 비고 모드 진입
+    if (field.freeText && (value === null || value === '')) {
+      state.memoMode = true;
+      setPendingBar(`"${field.name}" 모드: 다음 발화를 메모로 저장`);
+      speak('비고');
+      addLog({ event: 'memo_mode_enter' });
+      continue;
+    }
+
+    if (status === 'ok' && value !== null) {
+      state.currentData[field.id] = { value, warn, time: Date.now() };
+      state.lastSaved = { fieldId: field.id, value, time: Date.now() };
+      state.pendingField = null;
+      const ttsText = field.name.replace('조사', '') + ' ' + value + (warn ? ' 주의' : '');
+      speak(ttsText);
+      addLog({ event: 'save', field: field.name, value, method, confidence, warn });
+      savedAny = true;
+    } else if (status === 'pending') {
+      state.pendingField = { field };
+      setPendingBar(`"${field.name}" 값을 말해주세요`);
+      addLog({ event: 'pending', field: field.name, confidence });
+    } else if (status === 'noise') {
+      addLog({ event: 'noise', field: field.name, raw: item.raw, confidence });
+      showToast('⚠️ 비정상 숫자 무시됨');
+    } else if (status === 'invalid') {
+      addLog({ event: 'invalid', field: field.name, raw: item.raw, confidence });
+    }
+  }
+
+  if (savedAny) {
+    setPendingBar(null);
+    renderAll();
+  }
+}
+
+// ─── UI 헬퍼 ────────────────────────────────────────────────
+function showInterim(text) {
+  const el = document.getElementById('transcriptInterim');
+  if (el) el.textContent = text;
+}
+
+function showFinal(text) {
+  const el = document.getElementById('transcriptFinal');
+  if (el) el.textContent = text;
+}
+
+function setPendingBar(msg) {
+  const el = document.getElementById('pendingBar');
+  if (!el) return;
+  if (msg) {
+    el.textContent = msg;
+    el.classList.add('visible');
+  } else {
+    el.classList.remove('visible');
+    state.pendingField = null;
   }
 }
 
@@ -618,170 +305,391 @@ function updateMicBtn() {
   }
 }
 
-/* ─────────────────────────────────────────────
-   12. SETTINGS
-───────────────────────────────────────────── */
-function loadSettings() {
-  const s = state.settings;
-  const setVal = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
-  setVal('settingObserver', s.observer || '');
-  setVal('settingFarm', s.farmName || '');
-  setVal('settingLabel', s.label || '');
-  setVal('settingTreatment', s.treatment || '');
-  setVal('settingType', s.surveyType || '비대조사');
-
-  // apply to ctx
-  if (s.observer) state.ctx.observer = s.observer;
-  if (s.farmName) state.ctx.farmName = s.farmName;
-  if (s.label) state.ctx.label = s.label;
-  if (s.treatment) state.ctx.treatment = s.treatment;
-  if (s.surveyType) state.ctx.surveyType = s.surveyType;
+function showToast(msg, dur = 2200) {
+  const t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => t.classList.add('hidden'), dur);
 }
 
-function saveSettings() {
-  state.settings = {
-    observer: document.getElementById('settingObserver')?.value || '',
-    farmName: document.getElementById('settingFarm')?.value || '',
-    label: document.getElementById('settingLabel')?.value || '',
-    treatment: document.getElementById('settingTreatment')?.value || '',
-    surveyType: document.getElementById('settingType')?.value || '비대조사'
-  };
-  Object.assign(state.ctx, {
-    observer: state.settings.observer,
-    farmName: state.settings.farmName,
-    label: state.settings.label,
-    treatment: state.settings.treatment,
-    surveyType: state.settings.surveyType
-  });
-  localStorage.setItem('appSettings', JSON.stringify(state.settings));
-  renderContext();
+// ─── 렌더링 ──────────────────────────────────────────────────
+function renderAll() {
   renderFields();
-  showToast('설정 저장됨');
+  renderLogTable();
 }
 
-/* ─────────────────────────────────────────────
-   13. TABS
-───────────────────────────────────────────── */
+function renderFields() {
+  const el = document.getElementById('fieldsGrid');
+  if (!el) return;
+  const fields = getFields();
+  el.innerHTML = fields.map(f => {
+    const entry = state.currentData[f.id];
+    const val = entry?.value;
+    const warn = entry?.warn;
+    let cls = '';
+    if (val !== undefined && val !== null) cls = warn ? 'warn-val' : 'has-value';
+    const display = (val !== undefined && val !== null) ? val : '--';
+    return `<div class="field-card ${cls}">
+      <div class="field-name">${f.name}</div>
+      <div class="field-val">${display}</div>
+      <div class="field-unit">${f.unit || (f.freeText ? '메모' : '')}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderParseResult(parsed) {
+  const el = document.getElementById('parseResult');
+  if (!el) return;
+  if (!parsed || parsed.length === 0) {
+    el.innerHTML = '<div class="parse-result"><h3>파싱 결과</h3><div class="token-list" style="color:var(--text2);font-size:12px">매칭 없음</div></div>';
+    return;
+  }
+  const chips = parsed.map(p => {
+    let cls = p.status;
+    if (p.status === 'ok' && p.warn) cls = 'warn';
+    const label = p.field
+      ? (p.value !== null ? `${p.field.name} = ${p.value}` : `${p.field.name} ?`)
+      : (p.raw || '?');
+    const method = p.method ? ` [${p.method}]` : '';
+    return `<span class="token ${cls}" title="${method}">${label}${p.warn ? ' ⚠️' : ''}</span>`;
+  }).join('');
+  el.innerHTML = `<div class="parse-result"><h3>파싱 결과</h3><div class="token-list">${chips}</div></div>`;
+}
+
+// ─── 로그 탭 ────────────────────────────────────────────────
+function renderLogTable() {
+  const el = document.getElementById('logTable');
+  if (!el) return;
+  const rows = state.logs.filter(l => ['save', 'overwrite', 'pending', 'noise', 'invalid', 'no_match'].includes(l.event)).slice(0, 40);
+  if (!rows.length) {
+    el.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text2);padding:16px">아직 로그 없음</td></tr>';
+    return;
+  }
+  el.innerHTML = rows.map(l => {
+    const conf = Math.round((l.confidence || 0) * 100);
+    const confColor = conf > 80 ? 'var(--success)' : conf > 50 ? 'var(--warn)' : 'var(--error)';
+    const badge = l.event === 'save' || l.event === 'overwrite'
+      ? `<span style="color:var(--success)">저장</span>`
+      : l.event === 'pending' ? `<span style="color:var(--warn)">대기</span>`
+      : l.event === 'noise'   ? `<span style="color:var(--error)">노이즈</span>`
+      : `<span style="color:var(--text2)">${l.event}</span>`;
+    return `<tr>
+      <td>${l.ts.substring(11,19)}</td>
+      <td>${l.field || '-'}</td>
+      <td>${l.value ?? l.text ?? l.raw ?? '-'}</td>
+      <td>${badge}</td>
+    </tr>`;
+  }).join('');
+
+  const raw = document.getElementById('logRaw');
+  if (raw) raw.textContent = state.logs.slice(0, 30).map(l => JSON.stringify(l)).join('\n');
+
+  const cnt = document.getElementById('logCount');
+  if (cnt) cnt.textContent = `${state.logs.length}건`;
+}
+
+// ─── 항목설정 탭 ────────────────────────────────────────────
+function renderFieldSettings() {
+  const el = document.getElementById('fieldList');
+  if (!el) return;
+  const fields = getFields();
+  el.innerHTML = fields.map(f => {
+    const typeLabel = f.freeText ? '자유문장' : f.type === 'integer' ? '정수' : f.type === 'float' ? '소수' : '문자열';
+    const allowedStr = f.allowed ? `허용: ${f.allowed.join(', ')}` : f.range ? `범위: ${f.range[0]}~${f.range[1]}` : '';
+    return `<div class="field-item" id="fi_${f.id}">
+      <div class="field-item-header">
+        <span class="field-item-name">${f.name}</span>
+        <span class="field-item-type">${typeLabel}${f.unit ? ' / ' + f.unit : ''}</span>
+      </div>
+      <div class="field-item-aliases">alias: ${f.aliases.join(', ')}</div>
+      ${allowedStr ? `<div class="field-item-aliases">${allowedStr}</div>` : ''}
+      <div class="field-item-actions">
+        <button class="btn btn-secondary btn-sm" onclick="editField('${f.id}')">수정</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteFieldUI('${f.id}','${f.name}')">삭제</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+window.editField = function(id) {
+  const field = getFields().find(f => f.id === id);
+  if (!field) return;
+  openFieldModal(field);
+};
+
+window.deleteFieldUI = function(id, name) {
+  if (!confirm(`"${name}" 항목을 삭제할까요?`)) return;
+  removeField(id);
+  renderFieldSettings();
+  renderFields();
+  showToast(`"${name}" 삭제됨`);
+};
+
+// ─── 항목 편집 모달 ──────────────────────────────────────────
+let _editingFieldId = null;
+
+function openFieldModal(field) {
+  _editingFieldId = field ? field.id : null;
+  const modal = document.getElementById('fieldModal');
+  const title = document.getElementById('modalTitle');
+  if (!modal) return;
+
+  title.textContent = field ? '항목 수정' : '새 항목 추가';
+
+  document.getElementById('fmName').value    = field?.name || '';
+  document.getElementById('fmAliases').value = field?.aliases.join(', ') || '';
+  document.getElementById('fmType').value    = field?.type || 'integer';
+  document.getElementById('fmUnit').value    = field?.unit || '';
+  document.getElementById('fmAllowed').value = field?.allowed ? field.allowed.join(',') : '';
+  document.getElementById('fmRangeMin').value = field?.range ? field.range[0] : '';
+  document.getElementById('fmRangeMax').value = field?.range ? field.range[1] : '';
+  document.getElementById('fmFreeText').checked = field?.freeText || false;
+  document.getElementById('fmDesc').value   = field?.description || '';
+
+  modal.style.display = 'flex';
+}
+
+function closeFieldModal() {
+  const modal = document.getElementById('fieldModal');
+  if (modal) modal.style.display = 'none';
+  _editingFieldId = null;
+}
+
+function saveFieldModal() {
+  const name     = document.getElementById('fmName').value.trim();
+  const aliasStr = document.getElementById('fmAliases').value.trim();
+  const type     = document.getElementById('fmType').value;
+  const unit     = document.getElementById('fmUnit').value.trim();
+  const allowedStr = document.getElementById('fmAllowed').value.trim();
+  const rMin     = document.getElementById('fmRangeMin').value.trim();
+  const rMax     = document.getElementById('fmRangeMax').value.trim();
+  const freeText = document.getElementById('fmFreeText').checked;
+  const desc     = document.getElementById('fmDesc').value.trim();
+
+  if (!name) { showToast('항목명을 입력해주세요'); return; }
+
+  const aliases = aliasStr ? aliasStr.split(',').map(a => a.trim()).filter(a => a) : [name];
+  const allowed = allowedStr ? allowedStr.split(',').map(v => { const n = parseFloat(v.trim()); return isNaN(n) ? null : (type === 'integer' ? Math.round(n) : n); }).filter(v => v !== null) : null;
+  const range = rMin !== '' && rMax !== '' ? [parseFloat(rMin), parseFloat(rMax)] : null;
+
+  const data = { name, aliases, type, unit, allowed, range, freeText, description: desc };
+
+  if (_editingFieldId) {
+    updateField(_editingFieldId, data);
+    showToast(`"${name}" 수정됨`);
+  } else {
+    addField(data);
+    showToast(`"${name}" 추가됨`);
+  }
+
+  closeFieldModal();
+  renderFieldSettings();
+  renderFields();
+}
+
+// ─── 모델 탭 ─────────────────────────────────────────────────
+function renderModelTab() {
+  updateLLMStatusUI();
+}
+
+function updateLLMStatusUI() {
+  const dot  = document.getElementById('llmDot');
+  const text = document.getElementById('llmText');
+  if (!dot || !text) return;
+
+  dot.className = 'llm-dot';
+  switch (state.llmStatus) {
+    case 'ready':       dot.classList.add('ready');   text.textContent = '준비 완료'; break;
+    case 'loading':     dot.classList.add('loading'); text.textContent = '준비 중...'; break;
+    case 'failed':      dot.classList.add('failed');  text.textContent = '준비 실패'; break;
+    default:            text.textContent = '사용 불가'; break;
+  }
+
+  const strip = document.getElementById('llmStrip');
+  if (strip) {
+    const sdot = strip.querySelector('.llm-dot');
+    const stxt = strip.querySelector('#llmStripText');
+    if (sdot) { sdot.className = 'llm-dot'; if (state.llmStatus === 'ready') sdot.classList.add('ready'); }
+    if (stxt) stxt.textContent = state.llmStatus === 'ready' ? 'LLM 준비완료' : 'LLM 없음(규칙 기반)';
+  }
+}
+
+// ─── 테스트 실행 ──────────────────────────────────────────────
+function runParserTests() {
+  const fields = getFields();
+  const results = runTests(fields);
+  const pass = results.filter(r => r.pass).length;
+  const el = document.getElementById('testResults');
+  if (!el) return;
+  el.innerHTML = `<div style="font-size:12px;margin-bottom:6px;color:var(--text2)">통과 ${pass}/${results.length}</div>` +
+    results.map(r => `<div style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--border);">
+      <span style="color:${r.pass ? 'var(--success)' : 'var(--error)'}">${r.pass ? '✓' : '✗'}</span>
+      <span style="color:var(--text)">&nbsp;${r.input}</span>
+      <span style="color:var(--text2)">&nbsp;→ ${r.actual}</span>
+    </div>`).join('');
+  showToast(`테스트 ${pass}/${results.length} 통과`);
+}
+
+// ─── VAD 모드 ────────────────────────────────────────────────
+function setVadMode(mode) {
+  state.vadMode = mode;
+  document.querySelectorAll('.vad-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.vad === mode);
+  });
+  localStorage.setItem('citrusVadMode', mode);
+}
+
+// ─── TTS 속도 ────────────────────────────────────────────────
+function setTtsRate(rate) {
+  state.ttsRate = parseFloat(rate);
+  localStorage.setItem('citrusTtsRate', rate);
+}
+
+// ─── 온라인 상태 ─────────────────────────────────────────────
+function updateOnlineStatus() {
+  const badge = document.getElementById('statusBadge');
+  if (!badge) return;
+  badge.textContent = navigator.onLine ? '온라인' : '오프라인';
+  badge.className = 'status-badge ' + (navigator.onLine ? 'online' : 'offline');
+}
+
+// ─── 탭 전환 ────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${name}`));
-  if (name === 'log') { renderLogs(); renderLogTable(); }
+  if (name === 'log') { renderLogTable(); }
+  if (name === 'fields') { renderFieldSettings(); }
+  if (name === 'model') { renderModelTab(); }
 }
 
-/* ─────────────────────────────────────────────
-   14. LOG EXPORT
-───────────────────────────────────────────── */
+// ─── 로그 내보내기 ───────────────────────────────────────────
 function exportLogs() {
-  const data = JSON.stringify(state.logs, null, 2);
+  const data = JSON.stringify({ fields: getFields(), logs: state.logs, data: state.currentData }, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `citrus_voice_log_${new Date().toISOString().substring(0,10)}.json`;
+  a.download = `citrus_survey_${new Date().toISOString().substring(0, 10)}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  addLog({ event: 'log_exported', count: state.logs.length });
+  addLog({ event: 'export' });
 }
 
-function clearLogs() {
-  if (!confirm('모든 로그를 삭제할까요?')) return;
-  state.logs = [];
-  localStorage.removeItem('voiceLogs');
-  renderLogs();
-  renderLogTable();
-  showToast('로그 삭제됨');
+// ─── 현재 데이터 초기화 ─────────────────────────────────────
+function clearCurrentData() {
+  if (!confirm('현재 입력값을 모두 초기화할까요?')) return;
+  state.currentData = {};
+  state.lastSaved = null;
+  state.pendingField = null;
+  state.memoMode = false;
+  setPendingBar(null);
+  renderAll();
+  showToast('입력값 초기화됨');
 }
 
-/* ─────────────────────────────────────────────
-   15. INIT
-───────────────────────────────────────────── */
+// ─── 수동 테스트 입력 ────────────────────────────────────────
+function manualTest() {
+  const txt = (document.getElementById('testInput')?.value || '').trim();
+  if (!txt) return;
+  processFinalText(txt, 1.0);
+  addLog({ event: 'manual_test', text: txt });
+}
+
+// ─── 초기화 ─────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // Service Worker
+
+  // Service Worker 등록
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js')
-      .then(reg => addLog({ event: 'sw_registered', scope: reg.scope }))
-      .catch(err => addLog({ event: 'sw_error', error: err.message }));
+    navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {});
   }
 
-  // Online/offline
-  window.addEventListener('online', () => {
-    updateOnlineStatus();
-    addLog({ event: 'network_online' });
-    showToast('온라인 연결됨');
-  });
-  window.addEventListener('offline', () => {
-    updateOnlineStatus();
-    addLog({ event: 'network_offline' });
-    showToast('오프라인 모드', 3000);
-  });
+  // 온라인/오프라인
+  window.addEventListener('online',  () => { updateOnlineStatus(); showToast('온라인 연결됨'); });
+  window.addEventListener('offline', () => { updateOnlineStatus(); showToast('오프라인 모드', 3000); });
   updateOnlineStatus();
 
-  // Load settings
-  loadSettings();
-  renderContext();
-  renderFields();
-  renderLogTable();
+  // 로그 로드
+  loadLogs();
 
-  // Mic button
-  document.getElementById('micBtn')?.addEventListener('click', toggleRecording);
+  // 설정 로드
+  state.vadMode  = localStorage.getItem('citrusVadMode')  || 'balanced';
+  state.ttsRate  = parseFloat(localStorage.getItem('citrusTtsRate') || '0.92');
 
-  // Tabs
+  // 탭
   document.querySelectorAll('.tab').forEach(t =>
     t.addEventListener('click', () => switchTab(t.dataset.tab))
   );
 
-  // Settings
-  document.getElementById('btnSaveSettings')?.addEventListener('click', saveSettings);
+  // Mic
+  document.getElementById('micBtn')?.addEventListener('click', toggleRecording);
 
-  // Log actions
+  // VAD 버튼
+  document.querySelectorAll('.vad-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.vad === state.vadMode);
+    b.addEventListener('click', () => setVadMode(b.dataset.vad));
+  });
+
+  // TTS 속도
+  const ttsSelect = document.getElementById('ttsRate');
+  if (ttsSelect) {
+    ttsSelect.value = String(state.ttsRate);
+    ttsSelect.addEventListener('change', () => setTtsRate(ttsSelect.value));
+  }
+
+  // 수동 테스트
+  document.getElementById('btnManualTest')?.addEventListener('click', manualTest);
+  document.getElementById('testInput')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') manualTest();
+  });
+
+  // 로그 동작
   document.getElementById('btnExportLog')?.addEventListener('click', exportLogs);
-  document.getElementById('btnClearLog')?.addEventListener('click', clearLogs);
-
-  // Manual test input
-  document.getElementById('btnTestInput')?.addEventListener('click', () => {
-    const txt = document.getElementById('testInput')?.value || '';
-    if (!txt.trim()) return;
-    const parsed = parseStream(txt);
-    const actions = applyTokens(parsed.tokens);
-    addLog({
-      event: 'voice_result',
-      rawText: txt,
-      confidence: 1.0,
-      alternatives: [{ transcript: txt, confidence: 1.0 }],
-      normalized: parsed.normalized,
-      tokenCount: parsed.tokens.length,
-      tokens: parsed.tokens,
-      actions,
-      processingMs: 0,
-      ctx: { ...state.ctx },
-      isOnline: navigator.onLine,
-      inputMethod: 'manual_test'
-    });
-    renderParseResult(parsed);
-    renderContext();
-    renderFields();
+  document.getElementById('btnClearLog')?.addEventListener('click', () => {
+    if (!confirm('모든 로그를 삭제할까요?')) return;
+    state.logs = [];
+    try { localStorage.removeItem('citrusLogs_v3'); } catch {}
     renderLogTable();
-    document.getElementById('transcriptFinal').textContent = txt;
+    showToast('로그 삭제됨');
   });
 
-  // device info log
-  addLog({
-    event: 'app_init',
-    browserInfo: {
-      userAgent: navigator.userAgent,
-      platform: navigator.platform,
-      language: navigator.language,
-      onLine: navigator.onLine,
-      cookieEnabled: navigator.cookieEnabled,
-      maxTouchPoints: navigator.maxTouchPoints,
-      speechRecognitionSupported: !!SpeechRecognition,
-      speechSynthesisSupported: !!window.speechSynthesis,
-      serviceWorkerSupported: 'serviceWorker' in navigator
-    }
+  // 현재 데이터 초기화
+  document.getElementById('btnClearData')?.addEventListener('click', clearCurrentData);
+
+  // 항목설정 탭
+  document.getElementById('btnAddField')?.addEventListener('click', () => openFieldModal(null));
+  document.getElementById('btnResetFields')?.addEventListener('click', () => {
+    if (!confirm('항목을 기본값으로 초기화할까요?')) return;
+    resetFields();
+    renderFieldSettings();
+    renderFields();
+    showToast('항목 기본값으로 초기화됨');
   });
 
-  // reset for new session
-  state.currentData = {};
-  document.getElementById('transcriptFinal').textContent = '';
-  document.getElementById('transcriptInterim').textContent = '';
+  // 모달
+  document.getElementById('btnModalSave')?.addEventListener('click', saveFieldModal);
+  document.getElementById('btnModalCancel')?.addEventListener('click', closeFieldModal);
+  document.getElementById('fieldModal')?.addEventListener('click', e => {
+    if (e.target === document.getElementById('fieldModal')) closeFieldModal();
+  });
+
+  // 파서 테스트
+  document.getElementById('btnRunTests')?.addEventListener('click', runParserTests);
+
+  // 기기 정보
+  const setDev = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+  setDev('devUA',       navigator.userAgent.substring(0, 70));
+  setDev('devPlatform', navigator.platform);
+  setDev('devLang',     navigator.language);
+  setDev('devSTT',      SR ? '지원' : '미지원');
+  setDev('devTTS',      window.speechSynthesis ? '지원' : '미지원');
+  setDev('devTouch',    navigator.maxTouchPoints + '포인트');
+
+  // 초기 렌더링
+  renderFields();
+  renderLogTable();
+  updateLLMStatusUI();
+
+  addLog({ event: 'app_init', ua: navigator.userAgent });
 });

@@ -6,215 +6,164 @@
   <meta name="theme-color" content="#f97316">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="감귤음성">
-  <title>감귤 음성입력 테스트</title>
-  <link rel="manifest" href="manifest.json">
-  <link rel="stylesheet" href="style.css">
+  <meta name="apple-mobile-web-app-title" content="감귤조사">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <title>감귤 조사 음성입력</title>
+  <link rel="stylesheet" href="./style.css">
 </head>
 <body>
 
 <!-- Header -->
 <header>
-  <h1>🍊 감귤 음성입력 테스트</h1>
+  <h1>🍊 감귤 조사 음성입력</h1>
   <span id="statusBadge" class="status-badge">확인중...</span>
 </header>
 
 <!-- Tabs -->
 <div class="tabs">
   <button class="tab active" data-tab="survey">조사</button>
+  <button class="tab" data-tab="fields">항목설정</button>
+  <button class="tab" data-tab="model">모델</button>
   <button class="tab" data-tab="log">로그</button>
-  <button class="tab" data-tab="guide">안내</button>
-  <button class="tab" data-tab="settings">설정</button>
 </div>
 
-<!-- ── TAB: 조사 ── -->
+<!-- ═══════════════════════════════════════════════════
+     TAB: 조사
+════════════════════════════════════════════════════ -->
 <div class="tab-content active" id="tab-survey">
 
-  <!-- Context bar -->
-  <div id="contextBar" class="context-bar"></div>
+  <!-- LLM 상태 스트립 -->
+  <div class="llm-strip" id="llmStrip">
+    <div class="llm-dot"></div>
+    <span id="llmStripText">LLM 없음 (규칙 기반)</span>
+    <span style="flex:1"></span>
+    <!-- VAD 모드 -->
+    <span style="color:var(--text2);font-size:11px">VAD:</span>
+    <button class="vad-btn" data-vad="fast">빠름</button>
+    <button class="vad-btn active" data-vad="balanced">균형</button>
+    <button class="vad-btn" data-vad="accurate">정밀</button>
+  </div>
+
+  <!-- Pending 표시 -->
+  <div id="pendingBar" class="pending-bar"></div>
 
   <!-- Mic -->
   <div class="mic-wrap">
     <button id="micBtn" class="mic-btn">🎤<div class="mic-label">시작</div></button>
-    <div style="font-size:12px;color:var(--text2)">탭하여 음성 입력 시작/중지</div>
+    <div style="font-size:11px;color:var(--text2)">탭하여 음성입력 시작/중지</div>
   </div>
 
   <!-- Transcript -->
   <div class="transcript-box">
-    <span id="transcriptFinal" class="final"></span>
-    <span id="transcriptInterim" class="interim"></span>
+    <span id="transcriptFinal" class="final"></span><span id="transcriptInterim" class="interim"></span>
   </div>
 
-  <!-- Parse result -->
-  <div id="parseResult" class="parse-result">
-    <h3>파싱 결과</h3>
-    <div class="token-list" style="color:var(--text2);font-size:12px">음성 입력 후 여기에 파싱 결과가 표시됩니다</div>
+  <!-- Parse result 동적 영역 -->
+  <div id="parseResult">
+    <div class="parse-result">
+      <h3>파싱 결과</h3>
+      <div class="token-list" style="color:var(--text2);font-size:12px">음성 입력 후 결과가 표시됩니다</div>
+    </div>
   </div>
 
-  <!-- Current fields -->
+  <!-- 현재 입력값 그리드 -->
   <div style="margin-top:10px">
-    <div style="font-size:12px;color:var(--text2);margin-bottom:6px">현재 입력값</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div style="font-size:12px;color:var(--text2)">현재 입력값</div>
+      <button id="btnClearData" class="btn btn-secondary btn-sm">초기화</button>
+    </div>
     <div id="fieldsGrid" class="fields-grid"></div>
   </div>
 
-  <!-- Manual test -->
-  <div style="margin-top:14px;background:var(--surface);border-radius:10px;padding:12px">
-    <div style="font-size:12px;color:var(--text2);margin-bottom:8px">수동 테스트 (텍스트 직접 입력)</div>
-    <div style="display:flex;gap:8px">
-      <input id="testInput" type="text"
-        placeholder="예: 나무2 과실3 횡경22.5 종경35.1"
-        style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px;font-size:13px">
-      <button id="btnTestInput" class="btn btn-primary btn-sm">파싱</button>
+  <!-- 수동 테스트 -->
+  <div class="card" style="margin-top:12px">
+    <h3>수동 테스트 입력</h3>
+    <div class="test-row">
+      <input id="testInput" type="text" placeholder="예: 나무이 과실삼 변경백 종경22.5">
+      <button id="btnManualTest" class="btn btn-primary btn-sm">파싱</button>
     </div>
   </div>
 
 </div>
 
-<!-- ── TAB: 로그 ── -->
-<div class="tab-content" id="tab-log">
+<!-- ═══════════════════════════════════════════════════
+     TAB: 항목설정
+════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-fields">
 
-  <div class="log-actions">
-    <button id="btnExportLog" class="btn btn-secondary btn-sm">JSON 내보내기</button>
-    <button id="btnClearLog" class="btn btn-danger btn-sm">로그 삭제</button>
-    <span id="logCount" class="log-count"></span>
+  <div class="info-box">
+    항목명, alias(음성 별칭), 타입, 허용값을 설정합니다.<br>
+    음성 인식 시 alias 목록에서 필드를 찾습니다.
   </div>
 
-  <!-- Summary table -->
-  <div class="log-section" style="margin-bottom:14px">
-    <h3>음성 인식 결과 요약</h3>
-    <div class="log-table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>시간</th>
-            <th>인식 텍스트</th>
-            <th>신뢰도</th>
-            <th>토큰수</th>
-            <th>액션</th>
-          </tr>
-        </thead>
-        <tbody id="logTable">
-          <tr><td colspan="5" style="text-align:center;color:var(--text2);padding:20px">아직 로그 없음</td></tr>
-        </tbody>
-      </table>
-    </div>
+  <div style="display:flex;gap:8px;margin-bottom:12px">
+    <button id="btnAddField"    class="btn btn-primary btn-sm">+ 새 항목</button>
+    <button id="btnResetFields" class="btn btn-secondary btn-sm">기본값으로 초기화</button>
   </div>
 
-  <!-- Raw log -->
-  <div class="log-section">
-    <h3>상세 로그 (JSON)</h3>
-    <div class="raw-log" id="logEntries" style="max-height:400px"></div>
-  </div>
+  <div id="fieldList"></div>
 
 </div>
 
-<!-- ── TAB: 안내 ── -->
-<div class="tab-content" id="tab-guide">
+<!-- ═══════════════════════════════════════════════════
+     TAB: 모델
+════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-model">
+
+  <div class="card">
+    <h3>LLM 상태</h3>
+    <div class="model-status-row">
+      <span>로컬 LLM</span>
+      <div style="display:flex;align-items:center;gap:6px">
+        <div class="llm-dot" id="llmDot"></div>
+        <span id="llmText" style="font-size:12px">사용 불가</span>
+      </div>
+    </div>
+    <div class="model-status-row">
+      <span>Gemma (WebGPU)</span>
+      <span class="badge badge-error">불안정 (iOS Safari)</span>
+    </div>
+    <div class="model-status-row">
+      <span>Whisper.js</span>
+      <span class="badge badge-neutral">비활성화 (불안정)</span>
+    </div>
+    <div class="model-status-row">
+      <span>현재 엔진</span>
+      <span class="badge badge-ok">규칙 기반 파서</span>
+    </div>
+  </div>
 
   <div class="warn-box">
-    ⚠️ <strong>오프라인 음성인식 제한</strong><br>
-    Android Chrome: 인터넷 연결 필요 (Google 서버 처리)<br>
-    iOS Safari: 기기 내부 처리 (오프라인 가능, 일부 제한)<br>
-    오프라인 완전 지원은 Whisper.js 등 별도 모델 필요
+    ⚠️ 현재 기기 환경에서 WebGPU 기반 로컬 LLM은 불안정합니다.<br>
+    규칙 기반 파서만으로 모든 음성 입력이 정상 작동합니다.
   </div>
 
-  <div class="info-card">
-    <h3>음성 명령어</h3>
-    <table style="width:100%;font-size:12px">
-      <tr><th style="width:45%">말하는 내용</th><th>동작</th></tr>
-      <tr><td>"횡경 22.5"</td><td>측정값 저장 + TTS 확인</td></tr>
-      <tr><td>"나무 2"</td><td>나무 번호 변경</td></tr>
-      <tr><td>"과실 3"</td><td>과실 번호 변경</td></tr>
-      <tr><td>"농가 이원창"</td><td>농가명 변경</td></tr>
-      <tr><td>"라벨 B"</td><td>라벨 변경</td></tr>
-      <tr><td>"처리 관행"</td><td>처리구 변경</td></tr>
-      <tr><td>"수정" 또는 "정정"</td><td>수정 모드 ON</td></tr>
-      <tr><td>"취소"</td><td>직전 입력 되돌리기</td></tr>
-    </table>
-  </div>
-
-  <div class="info-card">
-    <h3>연속 발화 예시</h3>
-    <div style="font-family:monospace;font-size:12px;color:var(--text2);line-height:2">
-      "나무2 과실3 횡경22.5 종경35.1"<br>
-      → 나무=2, 과실=3, 횡경=22.5mm, 종경=35.1mm
-    </div>
-    <div style="margin-top:8px;font-size:12px;color:var(--text2)">
-      붙여서 말해도 자동 분리됩니다 ("횡경22.5" → "횡경" + "22.5")
-    </div>
-  </div>
-
-  <div class="info-card">
-    <h3>로그 활용</h3>
-    <div style="font-size:12px;color:var(--text2);line-height:1.7">
-      • 로그 탭에서 인식 결과·신뢰도 확인<br>
-      • JSON 내보내기로 전체 로그 저장<br>
-      • 개선 작업 시 로그 파일을 Claude에게 전달<br>
-      • 기기별·환경별 차이 비교 가능
-    </div>
-  </div>
-
-  <div class="info-card">
-    <h3>항목별 정상 범위</h3>
-    <table style="width:100%;font-size:12px">
-      <tr><th>항목</th><th>최소</th><th>최대</th><th>단위</th></tr>
-      <tr><td>횡경</td><td>10</td><td>100</td><td>mm</td></tr>
-      <tr><td>종경</td><td>10</td><td>100</td><td>mm</td></tr>
-      <tr><td>과중</td><td>5</td><td>300</td><td>g</td></tr>
-      <tr><td>당도</td><td>3</td><td>25</td><td>Brix</td></tr>
-      <tr><td>적정</td><td>0.1</td><td>10</td><td></td></tr>
-      <tr><td>산함량</td><td>0.1</td><td>10</td><td>%</td></tr>
-      <tr><td>착색</td><td>0</td><td>100</td><td>%</td></tr>
-      <tr><td>비파괴</td><td>3</td><td>25</td><td>Brix</td></tr>
-    </table>
-  </div>
-
-</div>
-
-<!-- ── TAB: 설정 ── -->
-<div class="tab-content" id="tab-settings">
-
-  <div class="setting-group">
-    <h3>조사자 정보</h3>
+  <div class="card">
+    <h3>TTS 속도</h3>
     <div class="setting-row">
-      <label>조사자 이름</label>
-      <input id="settingObserver" type="text" placeholder="홍길동">
-    </div>
-    <div class="setting-row">
-      <label>조사유형</label>
-      <select id="settingType">
-        <option value="비대조사">비대조사</option>
-        <option value="품질조사">품질조사</option>
-        <option value="추가조사">추가조사</option>
+      <label>음성 출력 속도</label>
+      <select id="ttsRate">
+        <option value="0.85">느리게 (0.85)</option>
+        <option value="0.92" selected>보통 (0.92)</option>
+        <option value="1.05">빠르게 (1.05)</option>
       </select>
     </div>
   </div>
 
-  <div class="setting-group">
-    <h3>기본 컨텍스트</h3>
-    <div class="setting-row">
-      <label>농가명</label>
-      <input id="settingFarm" type="text" placeholder="이원창">
+  <div class="card">
+    <h3>파서 테스트</h3>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px">
+      현재 항목 설정 기준으로 파서 테스트 케이스를 실행합니다.
     </div>
-    <div class="setting-row">
-      <label>라벨</label>
-      <input id="settingLabel" type="text" placeholder="A">
-    </div>
-    <div class="setting-row">
-      <label>처리구</label>
-      <input id="settingTreatment" type="text" placeholder="시험">
-    </div>
+    <button id="btnRunTests" class="btn btn-secondary btn-sm">테스트 실행</button>
+    <div id="testResults" style="margin-top:10px"></div>
   </div>
 
-  <div style="margin-top:10px">
-    <button id="btnSaveSettings" class="btn btn-primary" style="width:100%">설정 저장</button>
-  </div>
-
-  <!-- Device Info -->
-  <div class="setting-group" style="margin-top:14px">
+  <div class="card">
     <h3>기기 정보</h3>
-    <div style="font-size:11px;color:var(--text2);font-family:monospace;line-height:1.8">
-      <div>브라우저: <span id="devUA" style="color:var(--text)"></span></div>
+    <div style="font-size:11px;color:var(--text2);font-family:monospace;line-height:1.9">
+      <div>UA: <span id="devUA" style="color:var(--text);word-break:break-all"></span></div>
       <div>플랫폼: <span id="devPlatform" style="color:var(--text)"></span></div>
       <div>언어: <span id="devLang" style="color:var(--text)"></span></div>
       <div>음성인식: <span id="devSTT" style="color:var(--text)"></span></div>
@@ -225,20 +174,106 @@
 
 </div>
 
+<!-- ═══════════════════════════════════════════════════
+     TAB: 로그
+════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-log">
+
+  <div class="log-actions">
+    <button id="btnExportLog" class="btn btn-secondary btn-sm">JSON 내보내기</button>
+    <button id="btnClearLog"  class="btn btn-danger btn-sm">로그 삭제</button>
+    <span id="logCount" class="log-count"></span>
+  </div>
+
+  <div class="card" style="margin-bottom:10px">
+    <h3>최근 인식 결과</h3>
+    <div class="log-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>시간</th>
+            <th>항목</th>
+            <th>값</th>
+            <th>상태</th>
+          </tr>
+        </thead>
+        <tbody id="logTable">
+          <tr><td colspan="4" style="text-align:center;color:var(--text2);padding:16px">아직 로그 없음</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>상세 로그 (JSON)</h3>
+    <div class="raw-log" id="logRaw"></div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     Modal: 항목 편집
+════════════════════════════════════════════════════ -->
+<div id="fieldModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:200;
+  align-items:center;justify-content:center;padding:16px;">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;
+    padding:18px;width:100%;max-width:480px;max-height:90vh;overflow-y:auto;">
+    <h2 id="modalTitle" style="font-size:15px;margin-bottom:14px;color:var(--accent)">항목 추가</h2>
+
+    <div class="form-group">
+      <label>항목명 *</label>
+      <input id="fmName" type="text" placeholder="예: 착색도">
+    </div>
+    <div class="form-group">
+      <label>음성 alias (쉼표 구분)</label>
+      <input id="fmAliases" type="text" placeholder="착색도, 착색또, 착색 도">
+    </div>
+    <div class="form-group">
+      <label>값 타입</label>
+      <select id="fmType">
+        <option value="integer">정수 (integer)</option>
+        <option value="float">소수 (float)</option>
+        <option value="string">문자열 (string)</option>
+        <option value="enum">열거형 (enum)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>단위 (선택)</label>
+      <input id="fmUnit" type="text" placeholder="mm, g, Brix...">
+    </div>
+    <div class="form-group">
+      <label>허용값 (쉼표 구분, 비워두면 제한 없음)</label>
+      <input id="fmAllowed" type="text" placeholder="1,2,3,4,5">
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <div class="form-group" style="flex:1;margin:0">
+        <label>최솟값</label>
+        <input id="fmRangeMin" type="number" placeholder="0">
+      </div>
+      <div class="form-group" style="flex:1;margin:0">
+        <label>최댓값</label>
+        <input id="fmRangeMax" type="number" placeholder="300">
+      </div>
+    </div>
+    <div class="form-group" style="display:flex;align-items:center;gap:8px">
+      <input id="fmFreeText" type="checkbox" style="width:auto">
+      <label style="margin:0">자유문장 항목 (비고 처럼)</label>
+    </div>
+    <div class="form-group">
+      <label>설명 (선택)</label>
+      <input id="fmDesc" type="text" placeholder="간단한 설명">
+    </div>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+      <button id="btnModalCancel" class="btn btn-secondary">취소</button>
+      <button id="btnModalSave"   class="btn btn-primary">저장</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div id="toast" class="hidden"></div>
 
-<script src="app.js"></script>
-<script>
-// 기기 정보 표시
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('devUA').textContent = navigator.userAgent.substring(0,60) + '...';
-  document.getElementById('devPlatform').textContent = navigator.platform;
-  document.getElementById('devLang').textContent = navigator.language;
-  document.getElementById('devSTT').textContent = (window.SpeechRecognition || window.webkitSpeechRecognition) ? '지원' : '미지원';
-  document.getElementById('devTTS').textContent = window.speechSynthesis ? '지원' : '미지원';
-  document.getElementById('devTouch').textContent = navigator.maxTouchPoints + '포인트';
-});
-</script>
+<script type="module" src="./app.js"></script>
 </body>
 </html>
